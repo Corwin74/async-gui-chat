@@ -1,5 +1,7 @@
 import asyncio
+import aiofiles
 import logging
+import datetime
 import dotenv
 import configargparse
 import gui
@@ -13,14 +15,28 @@ HISTORY_FILENAME = 'history.txt'
 logger = logging.getLogger('minechat')
 
 
-async def read_msgs(host, port, queue):
+def get_datetime_now():
+    return datetime.datetime.now().strftime("%d.%m.%y %H:%M:%S")
+
+
+async def save_messages(filepath, save_msgs_queue):
+    async with aiofiles.open(filepath, 'a') as f:
+        while True:
+            message = await save_msgs_queue.get()
+            formatted_date = get_datetime_now()
+            await f.write(f'[{formatted_date}] {message}\n')
+
+
+async def read_msgs(host, port, messages_queue, save_msgs_queue):
     async with open_socket(host, port) as s:
         reader, _ = s
         logger.debug('Start listening chat')
         while not reader.at_eof():
             future = reader.readline()
             line = await asyncio.wait_for(future, READING_TIMEOUT)
-            queue.put_nowait(line.decode().rstrip())
+            msg = line.decode().rstrip()
+            messages_queue.put_nowait(msg)
+            save_msgs_queue.put_nowait(msg)
 
 
 async def main():
@@ -80,11 +96,19 @@ async def main():
     messages_queue = asyncio.Queue()
     sending_queue = asyncio.Queue()
     status_updates_queue = asyncio.Queue()
+    save_msgs_queue = asyncio.Queue()
 
     loop = await asyncio.gather(
         gui.draw(messages_queue, sending_queue, status_updates_queue),
-        read_msgs(options.host, options.port_out, messages_queue),
+        read_msgs(
+            options.host,
+            options.port_out,
+            messages_queue,
+            save_msgs_queue,
+        ),
+        save_messages(HISTORY_FILENAME, save_msgs_queue),
     )
+    print(loop)
 
 
 if __name__ == '__main__':
