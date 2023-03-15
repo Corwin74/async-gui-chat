@@ -3,13 +3,13 @@ import logging
 import datetime
 import json
 import os
+from tkinter import messagebox
 import aiofiles
 from aiofiles import os as aio_os
 import dotenv
 import configargparse
 import gui
 from socket_manager import open_socket
-from tkinter import messagebox
 
 
 READING_TIMEOUT = 600
@@ -34,8 +34,8 @@ async def save_messages(filepath, save_msgs_queue):
             await f.write(f'{message}\n')
 
 
-async def read_msgs(host, port, messages_queue, save_msgs_queue):
-    async with open_socket(host, port) as s:
+async def read_msgs(host, port, messages_queue, save_msgs_queue, status_updates_queue):
+    async with open_socket(host, port, status_updates_queue, gui.SendingConnectionStateChanged) as s:
         reader, _ = s
         logger.debug('Start listening chat')
         while not reader.at_eof():
@@ -48,8 +48,9 @@ async def read_msgs(host, port, messages_queue, save_msgs_queue):
             save_msgs_queue.put_nowait(message)
 
 
-async def send_msgs(host, port, sending_queue, messages_queue):
-    async with open_socket(host, port) as s:
+async def send_msgs(host, port, sending_queue, messages_queue, status_updates_queue):
+    status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
+    async with open_socket(host, port, status_updates_queue, gui.ReadConnectionStateChanged) as s:
         reader, writer = s
         await handle_chat_reply(reader)
         chat_token = os.getenv('MINECHAT_TOKEN')
@@ -57,10 +58,7 @@ async def send_msgs(host, port, sending_queue, messages_queue):
         if not nickname:
             raise InvalidToken()
         logger.debug('Log in chat as %s', nickname)
-        print(
-            f'[{get_datetime_now()}] Успешный вход в чат под именем:'
-            f'{nickname}'
-        )
+        status_updates_queue.put_nowait(gui.NicknameReceived(nickname))
         while True:
             message = await sending_queue.get()
             formatted_date = get_datetime_now()
@@ -179,6 +177,7 @@ async def main():
                 options.port_out,
                 messages_queue,
                 save_msgs_queue,
+                status_updates_queue,
             ),
             save_messages(history_filename, save_msgs_queue),
             send_msgs(
@@ -186,6 +185,7 @@ async def main():
                 options.port_in,
                 sending_queue,
                 messages_queue,
+                status_updates_queue,
             ),
         )
     except InvalidToken:
