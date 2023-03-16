@@ -3,11 +3,14 @@ import logging
 import datetime
 import json
 import os
+import socket
 from tkinter import messagebox
 import aiofiles
 from aiofiles import os as aio_os
+from async_timeout import timeout
 import dotenv
 import configargparse
+from anyio import sleep, create_task_group, run, ExceptionGroup
 import gui
 from socket_manager import open_socket
 
@@ -15,6 +18,8 @@ from socket_manager import open_socket
 READING_TIMEOUT = 600
 RECONNECT_DELAY = 30
 HISTORY_FILENAME = 'history.txt'
+CONNECTION_TIMEOUT = 5
+PING_DELAY = 1
 
 logger = logging.getLogger('minechat')
 watchdog_logger = logging.getLogger('watchdog')
@@ -59,7 +64,7 @@ async def send_msgs(host, port, sending_queue, status_updates_queue, watchdog_qu
     status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
     async with open_socket(host, port, status_updates_queue, gui.ReadConnectionStateChanged) as s:
         reader, writer = s
-        await handle_chat_reply(reader, watchdog_queue)
+        await handle_chat_reply(reader, watchdog_queue, 'Prompt before auth')
         chat_token = os.getenv('MINECHAT_TOKEN')
         nickname = await authorise(reader, writer, chat_token, watchdog_queue)
         if not nickname:
@@ -73,32 +78,28 @@ async def send_msgs(host, port, sending_queue, status_updates_queue, watchdog_qu
             await writer.drain()
             writer.write('\n'.encode())
             await writer.drain()
+            await handle_chat_reply(reader, watchdog_queue, 'Message has been sent')
             logger.debug('Send: %s', message)
-            watchdog_queue.put_nowait('Connection is alive. Message sent')
-            watchdog_logger.debug('Message sent')
 
 
-async def handle_chat_reply(reader, watchdog_queue):
+async def handle_chat_reply(reader, watchdog_queue, source):
     future = reader.readline()
     line = await asyncio.wait_for(future, READING_TIMEOUT)
     decoded_line = line.decode().rstrip()
     logger.debug('Recieve: %s', decoded_line)
-    watchdog_queue.put_nowait('Connection is alive. Receive reply from server')
-    watchdog_logger.debug('Receive reply from server')
+    watchdog_queue.put_nowait(f'Connection is alive. Source: {source}')
+    watchdog_logger.debug('Source: %s', source)
     return decoded_line
 
 
 async def authorise(reader, writer, chat_token, watchdog_queue):
     writer.write(f'{chat_token}\n'.encode())
     await writer.drain()
-    watchdog_queue.put_nowait('Connection is alive. Token has been sent')
-    authorization_reply = await handle_chat_reply(reader, watchdog_queue)
-    logger.debug('Authorization reply: %s', authorization_reply)
+    authorization_reply = await handle_chat_reply(reader, watchdog_queue, 'Authorization done')
     parsed_reply = json.loads(authorization_reply)
     if parsed_reply is None:
         logger.error('Token "%s" is not valid', {chat_token.rstrip()})
         return None
-    await handle_chat_reply(reader, watchdog_queue)
     return parsed_reply['nickname']
 
 
@@ -114,18 +115,52 @@ async def load_history(filepath, messages_queue):
 
 async def watch_for_connection(watchdog_queue):
     while True:
-        message = await watchdog_queue.get()
-        print(f'[{get_datetime_now()}] {message}')
+        
+        try:
+            async with timeout(CONNECTION_TIMEOUT) as cm:
+                message = await watchdog_queue.get()
+                print(f'[{get_datetime_now()}] {message}')
+        except asyncio.TimeoutError:
+            if cm.expired:
+                print('1s timeout is elapsed')
+                raise ConnectionError()
+
+
+async def ping(sending_queue):
+    while True:
+        sending_queue.put_nowait('')
+        await sleep(PING_DELAY)
+
+
+async def handle_connection(host, port_in, port_out, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, filepath):
+    while True:
+        try:
+            async with create_task_group() as tg:
+                tg.start_soon(read_msgs, host, port_out, messages_queue, save_msgs_queue, status_updates_queue, watchdog_queue)
+                tg.start_soon(send_msgs, host, port_in, sending_queue, status_updates_queue, watchdog_queue)
+                tg.start_soon(save_messages, filepath, save_msgs_queue)
+                tg.start_soon(watch_for_connection, watchdog_queue)
+                tg.start_soon(ping, sending_queue)
+        except (ExceptionGroup, ConnectionError):
+            print('Reconnect')
+            logger.debug('Recoonect')
+            await sleep(1)
 
 
 async def main():
-    logging.basicConfig(
-        filename='listen_minechat.log',
-        filemode='w',
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.DEBUG,
+    minechat_handler = logging.FileHandler('minechat.log')
+    watchdog_handler = logging.FileHandler('watchdog.log')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
     )
+    minechat_handler.setFormatter(formatter)
+    watchdog_handler.setFormatter(formatter)
+    logger.setLevel('DEBUG')
+    watchdog_logger.setLevel('DEBUG')
+    logger.addHandler(minechat_handler)
+    watchdog_logger.addHandler(watchdog_handler)
+    
     dotenv.load_dotenv()
     parser = configargparse.ArgParser()
     parser.add(
@@ -188,23 +223,7 @@ async def main():
     try:
         await asyncio.gather(
             gui.draw(messages_queue, sending_queue, status_updates_queue),
-            read_msgs(
-                options.host,
-                options.port_out,
-                messages_queue,
-                save_msgs_queue,
-                status_updates_queue,
-                watchdog_queue,
-            ),
-            save_messages(history_filename, save_msgs_queue),
-            send_msgs(
-                options.host,
-                options.port_in,
-                sending_queue,
-                status_updates_queue,
-                watchdog_queue
-            ),
-            watch_for_connection(watchdog_queue),
+            handle_connection(options.host, options.port_in, options.port_out, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, history_filename),
         )
     except InvalidToken:
         messagebox.showerror(
