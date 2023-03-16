@@ -1,0 +1,5 @@
+aiofiles~=23.1.0
+aiohttp
+ConfigArgParse
+python-dotenv
+async-timeout

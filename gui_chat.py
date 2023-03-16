@@ -55,7 +55,7 @@ async def read_msgs(host, port, messages_queue, save_msgs_queue, status_updates_
             watchdog_logger.debug('New message in chat')
 
 
-async def send_msgs(host, port, sending_queue, messages_queue, status_updates_queue, watchdog_queue):
+async def send_msgs(host, port, sending_queue, status_updates_queue, watchdog_queue):
     status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
     async with open_socket(host, port, status_updates_queue, gui.ReadConnectionStateChanged) as s:
         reader, writer = s
@@ -96,9 +96,6 @@ async def authorise(reader, writer, chat_token, watchdog_queue):
     logger.debug('Authorization reply: %s', authorization_reply)
     parsed_reply = json.loads(authorization_reply)
     if parsed_reply is None:
-        print(f'[{get_datetime_now()}] Неизвестный токен: '
-              f'"{chat_token.rstrip()}". '
-              'Проверьте его или зарегистрируйте заново.')
         logger.error('Token "%s" is not valid', {chat_token.rstrip()})
         return None
     await handle_chat_reply(reader, watchdog_queue)
@@ -204,7 +201,6 @@ async def main():
                 options.host,
                 options.port_in,
                 sending_queue,
-                messages_queue,
                 status_updates_queue,
                 watchdog_queue
             ),
