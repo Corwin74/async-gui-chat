@@ -10,7 +10,7 @@ from aiofiles import os as aio_os
 from async_timeout import timeout
 import dotenv
 import configargparse
-from anyio import sleep, create_task_group, run, ExceptionGroup
+from anyio import sleep, create_task_group, ExceptionGroup
 import gui
 from socket_manager import open_socket
 
@@ -18,8 +18,8 @@ from socket_manager import open_socket
 READING_TIMEOUT = 600
 RECONNECT_DELAY = 30
 HISTORY_FILENAME = 'history.txt'
-CONNECTION_TIMEOUT = 5
-PING_DELAY = 1
+CONNECTION_TIMEOUT = 120
+PING_DELAY = 3
 
 logger = logging.getLogger('minechat')
 watchdog_logger = logging.getLogger('watchdog')
@@ -35,6 +35,21 @@ def get_datetime_now():
 
 def sanitize_input(message):
     return message.replace('\n', ' ')
+
+
+async def register(reader, writer, watchdog_queue, nickname):
+    logger.debug('Send empty line to obtain new token')
+    writer.write('\n'.encode())
+    await writer.drain()
+    await handle_chat_reply(reader, watchdog_queue, 'Send empty line to obtain new token')
+    writer.write(f'{nickname}\n'.encode())
+    await writer.drain()
+    logger.debug('Send %s as nickname', nickname)
+    reply = await handle_chat_reply(reader, watchdog_queue, 'Get authorize')
+    parsed_reply = json.loads(reply)
+    chat_token = parsed_reply['account_hash']
+    registered_nickname = parsed_reply['nickname']
+    logger.debug('Get new token: %s', chat_token)
 
 
 async def save_messages(filepath, save_msgs_queue):
@@ -56,17 +71,25 @@ async def read_msgs(host, port, messages_queue, save_msgs_queue, status_updates_
             message = f'[{formatted_date}] {message}'
             messages_queue.put_nowait(message)
             save_msgs_queue.put_nowait(message)
-            watchdog_queue.put_nowait('Connection is alive. New message in chat')
+            watchdog_queue.put_nowait(
+                'Connection is alive. Source: New message in chat'
+            )
             watchdog_logger.debug('New message in chat')
 
 
-async def send_msgs(host, port, sending_queue, status_updates_queue, watchdog_queue):
+async def send_msgs(host, port, chat_token, sending_queue, status_updates_queue, watchdog_queue, ask_nickname_queue, send_nickname_queue):
     status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
     async with open_socket(host, port, status_updates_queue, gui.ReadConnectionStateChanged) as s:
         reader, writer = s
         await handle_chat_reply(reader, watchdog_queue, 'Prompt before auth')
-        chat_token = os.getenv('MINECHAT_TOKEN')
-        nickname = await authorise(reader, writer, chat_token, watchdog_queue)
+        if chat_token:
+            ask_nickname_queue.put_nowait('SUCCESS')
+            nickname = await authorise(reader, writer, chat_token, watchdog_queue)
+        else:
+            ask_nickname_queue.put_nowait('ASK_NICKNAME')
+            nickname = await send_nickname_queue.get()
+            await register(reader, writer, watchdog_queue, nickname)
+            ask_nickname_queue.put_nowait('OK')
         if not nickname:
             raise InvalidToken()
         logger.debug('Log in chat as %s', nickname)
@@ -74,11 +97,16 @@ async def send_msgs(host, port, sending_queue, status_updates_queue, watchdog_qu
         while True:
             message = await sending_queue.get()
             message = sanitize_input(message)
-            writer.write(f'{message}\n'.encode())
-            await writer.drain()
+            if not message == '':
+                writer.write(f'{message}\n'.encode())
+                await writer.drain()
             writer.write('\n'.encode())
             await writer.drain()
-            await handle_chat_reply(reader, watchdog_queue, 'Message has been sent')
+            await handle_chat_reply(
+                reader,
+                watchdog_queue,
+                'Message has been sent'
+            )
             logger.debug('Send: %s', message)
 
 
@@ -95,7 +123,11 @@ async def handle_chat_reply(reader, watchdog_queue, source):
 async def authorise(reader, writer, chat_token, watchdog_queue):
     writer.write(f'{chat_token}\n'.encode())
     await writer.drain()
-    authorization_reply = await handle_chat_reply(reader, watchdog_queue, 'Authorization done')
+    authorization_reply = await handle_chat_reply(
+        reader,
+        watchdog_queue,
+        'Authorization done'
+    )
     parsed_reply = json.loads(authorization_reply)
     if parsed_reply is None:
         logger.error('Token "%s" is not valid', {chat_token.rstrip()})
@@ -115,14 +147,12 @@ async def load_history(filepath, messages_queue):
 
 async def watch_for_connection(watchdog_queue):
     while True:
-        
         try:
             async with timeout(CONNECTION_TIMEOUT) as cm:
-                message = await watchdog_queue.get()
-                print(f'[{get_datetime_now()}] {message}')
+                await watchdog_queue.get()
         except asyncio.TimeoutError:
             if cm.expired:
-                print('1s timeout is elapsed')
+                logger.debug('%ss timeout is elapsed', CONNECTION_TIMEOUT)
                 raise ConnectionError()
 
 
@@ -132,18 +162,35 @@ async def ping(sending_queue):
         await sleep(PING_DELAY)
 
 
-async def handle_connection(host, port_in, port_out, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, filepath):
+async def handle_connection(host, port_in, port_out, token, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, ask_nickname_queue, send_nickname_queue, filepath):
     while True:
         try:
             async with create_task_group() as tg:
-                tg.start_soon(read_msgs, host, port_out, messages_queue, save_msgs_queue, status_updates_queue, watchdog_queue)
-                tg.start_soon(send_msgs, host, port_in, sending_queue, status_updates_queue, watchdog_queue)
+                tg.start_soon(
+                    read_msgs,
+                    host,
+                    port_out,
+                    messages_queue,
+                    save_msgs_queue,
+                    status_updates_queue,
+                    watchdog_queue
+                )
+                tg.start_soon(
+                    send_msgs,
+                    host,
+                    port_in,
+                    token,
+                    sending_queue,
+                    status_updates_queue,
+                    watchdog_queue,
+                    ask_nickname_queue,
+                    send_nickname_queue,
+                )
                 tg.start_soon(save_messages, filepath, save_msgs_queue)
                 tg.start_soon(watch_for_connection, watchdog_queue)
                 tg.start_soon(ping, sending_queue)
-        except (ExceptionGroup, ConnectionError):
-            print('Reconnect')
-            logger.debug('Recoonect')
+        except (ExceptionGroup, ConnectionError, socket.gaierror):
+            logger.debug('Reconnect')
             await sleep(1)
 
 
@@ -160,7 +207,7 @@ async def main():
     watchdog_logger.setLevel('DEBUG')
     logger.addHandler(minechat_handler)
     watchdog_logger.addHandler(watchdog_handler)
-    
+
     dotenv.load_dotenv()
     parser = configargparse.ArgParser()
     parser.add(
@@ -213,6 +260,8 @@ async def main():
     status_updates_queue = asyncio.Queue()
     save_msgs_queue = asyncio.Queue()
     watchdog_queue = asyncio.Queue()
+    ask_nickname_queue = asyncio.Queue()
+    send_nickname_queue = asyncio.Queue()
 
     if options.history:
         history_filename = options.history
@@ -221,10 +270,30 @@ async def main():
     await load_history(history_filename, messages_queue)
 
     try:
-        await asyncio.gather(
-            gui.draw(messages_queue, sending_queue, status_updates_queue),
-            handle_connection(options.host, options.port_in, options.port_out, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, history_filename),
-        )
+        async with create_task_group() as tg:
+            tg.start_soon(
+                gui.draw,
+                messages_queue,
+                sending_queue,
+                status_updates_queue,
+                ask_nickname_queue,
+                send_nickname_queue,
+            )
+            tg.start_soon(
+                handle_connection,
+                options.host,
+                options.port_in,
+                options.port_out,
+                options.token,
+                messages_queue,
+                save_msgs_queue,
+                sending_queue,
+                status_updates_queue,
+                watchdog_queue,
+                ask_nickname_queue,
+                send_nickname_queue,
+                history_filename
+            )
     except InvalidToken:
         messagebox.showerror(
             'Неверный токен',
@@ -233,4 +302,9 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.debug('Exit on Ctrl-C')
+    except gui.TkAppClosed:
+        logger.debug('Main window closed. Exit')

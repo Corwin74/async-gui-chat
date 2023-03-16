@@ -1,7 +1,9 @@
 import tkinter as tk
 import asyncio
+from tkinter import simpledialog
 from tkinter.scrolledtext import ScrolledText
 from enum import Enum
+from anyio import create_task_group
 
 
 class TkAppClosed(Exception):
@@ -100,7 +102,7 @@ def create_status_panel(root_frame):
     return (nickname_label, status_read_label, status_write_label)
 
 
-async def draw(messages_queue, sending_queue, status_updates_queue):
+async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname_queue, send_nickname_queue):
     root = tk.Tk()
 
     root.title('Чат Майнкрафтера')
@@ -126,8 +128,15 @@ async def draw(messages_queue, sending_queue, status_updates_queue):
     conversation_panel = ScrolledText(root_frame, wrap='none')
     conversation_panel.pack(side="top", fill="both", expand=True)
 
-    await asyncio.gather(
-        update_tk(root_frame),
-        update_conversation_history(conversation_panel, messages_queue),
-        update_status_panel(status_labels, status_updates_queue)
-    )
+    status = await ask_nickname_queue.get()
+    if not status == 'SUCCESS':
+        nickname = simpledialog.askstring('jjdjd', 'jdjdjd')
+        send_nickname_queue.put_nowait(nickname)
+        status = await ask_nickname_queue.get()
+        if not status == 'OK':
+            raise TkAppClosed()
+
+    async with create_task_group() as gui_group:
+        gui_group.start_soon(update_tk, root_frame)
+        gui_group.start_soon(update_conversation_history, conversation_panel, messages_queue)
+        gui_group.start_soon(update_status_panel, status_labels, status_updates_queue)
