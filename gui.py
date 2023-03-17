@@ -1,6 +1,5 @@
 import tkinter as tk
 import asyncio
-from tkinter import simpledialog
 from tkinter.scrolledtext import ScrolledText
 from enum import Enum
 from anyio import create_task_group
@@ -102,6 +101,25 @@ def create_status_panel(root_frame):
     return (nickname_label, status_read_label, status_write_label)
 
 
+def input_nickname():
+    try:
+        root = tk.Tk()
+        root.title('Регистрация нового пользователя')
+        root.geometry("400x150")
+        label = tk.Label(text='Введите имя пользователя:')
+        label.pack(anchor='center', pady=10)
+        input_field = tk.Entry(bd=3, width=40)
+        input_field.pack(anchor="center", pady=10)
+        send_button = tk.Button()
+        send_button["text"] = "Зарегистрировать"
+        send_button["command"] = root.quit
+        send_button.pack(anchor='center', pady=10)
+        root.mainloop()
+        return input_field.get()
+    except tk.TclError:
+        return None
+
+
 async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname_queue, send_nickname_queue):
     root = tk.Tk()
 
@@ -127,14 +145,6 @@ async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname
 
     conversation_panel = ScrolledText(root_frame, wrap='none')
     conversation_panel.pack(side="top", fill="both", expand=True)
-
-    status = await ask_nickname_queue.get()
-    if not status == 'SUCCESS':
-        nickname = simpledialog.askstring('jjdjd', 'jdjdjd')
-        send_nickname_queue.put_nowait(nickname)
-        status = await ask_nickname_queue.get()
-        if not status == 'OK':
-            raise TkAppClosed()
 
     async with create_task_group() as gui_group:
         gui_group.start_soon(update_tk, root_frame)

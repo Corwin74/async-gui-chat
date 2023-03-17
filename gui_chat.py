@@ -13,6 +13,8 @@ import configargparse
 from anyio import sleep, create_task_group, ExceptionGroup
 import gui
 from socket_manager import open_socket
+import tkinter as tk
+from tkinter import simpledialog
 
 
 READING_TIMEOUT = 600
@@ -269,6 +271,9 @@ async def main():
         history_filename = HISTORY_FILENAME
     await load_history(history_filename, messages_queue)
 
+    if not options.token:
+        print(gui.input_nickname())
+    return
     try:
         async with create_task_group() as tg:
             tg.start_soon(
