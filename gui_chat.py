@@ -2,7 +2,6 @@ import asyncio
 import logging
 import datetime
 import json
-import os
 import socket
 from tkinter import messagebox
 import aiofiles
@@ -13,8 +12,6 @@ import configargparse
 from anyio import sleep, create_task_group, ExceptionGroup
 import gui
 from socket_manager import open_socket
-import tkinter as tk
-from tkinter import simpledialog
 
 
 READING_TIMEOUT = 600
@@ -43,7 +40,11 @@ async def register(reader, writer, watchdog_queue, nickname):
     logger.debug('Send empty line to obtain new token')
     writer.write('\n'.encode())
     await writer.drain()
-    await handle_chat_reply(reader, watchdog_queue, 'Send empty line to obtain new token')
+    await handle_chat_reply(
+        reader,
+        watchdog_queue,
+        'Send empty line to obtain new token',
+    )
     writer.write(f'{nickname}\n'.encode())
     await writer.drain()
     logger.debug('Send %s as nickname', nickname)
@@ -52,6 +53,13 @@ async def register(reader, writer, watchdog_queue, nickname):
     chat_token = parsed_reply['account_hash']
     registered_nickname = parsed_reply['nickname']
     logger.debug('Get new token: %s', chat_token)
+    if not await aio_os.path.exists('.env'):
+        async with aiofiles.open('.env', mode='w') as f:
+            await f.write('# File created by minechat.py\n')
+            logger.debug('Create .env file')
+    dotenv.set_key('.env', "MINECHAT_TOKEN", chat_token)
+    logger.debug('Save chat access token to .env file')
+    return chat_token, registered_nickname
 
 
 async def save_messages(filepath, save_msgs_queue):
@@ -61,8 +69,20 @@ async def save_messages(filepath, save_msgs_queue):
             await f.write(f'{message}\n')
 
 
-async def read_msgs(host, port, messages_queue, save_msgs_queue, status_updates_queue, watchdog_queue):
-    async with open_socket(host, port, status_updates_queue, gui.SendingConnectionStateChanged) as s:
+async def read_msgs(
+    host,
+    port,
+    messages_queue,
+    save_msgs_queue,
+    status_updates_queue,
+    watchdog_queue
+):
+    async with open_socket(
+        host,
+        port,
+        status_updates_queue,
+        gui.SendingConnectionStateChanged,
+    ) as s:
         reader, _ = s
         logger.debug('Start listening chat')
         while not reader.at_eof():
@@ -79,19 +99,37 @@ async def read_msgs(host, port, messages_queue, save_msgs_queue, status_updates_
             watchdog_logger.debug('New message in chat')
 
 
-async def send_msgs(host, port, chat_token, sending_queue, status_updates_queue, watchdog_queue, ask_nickname_queue, send_nickname_queue):
-    status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
-    async with open_socket(host, port, status_updates_queue, gui.ReadConnectionStateChanged) as s:
+async def send_msgs(
+    host,
+    port,
+    chat_token,
+    user,
+    sending_queue,
+    status_updates_queue,
+    watchdog_queue
+):
+    async with open_socket(
+        host,
+        port,
+        status_updates_queue,
+        gui.ReadConnectionStateChanged
+    ) as s:
         reader, writer = s
         await handle_chat_reply(reader, watchdog_queue, 'Prompt before auth')
         if chat_token:
-            ask_nickname_queue.put_nowait('SUCCESS')
-            nickname = await authorise(reader, writer, chat_token, watchdog_queue)
+            nickname = await authorise(
+                reader,
+                writer,
+                chat_token,
+                watchdog_queue,
+            )
         else:
-            ask_nickname_queue.put_nowait('ASK_NICKNAME')
-            nickname = await send_nickname_queue.get()
-            await register(reader, writer, watchdog_queue, nickname)
-            ask_nickname_queue.put_nowait('OK')
+            chat_token, nickname = await register(
+                reader,
+                writer,
+                watchdog_queue,
+                user
+            )
         if not nickname:
             raise InvalidToken()
         logger.debug('Log in chat as %s', nickname)
@@ -164,7 +202,19 @@ async def ping(sending_queue):
         await sleep(PING_DELAY)
 
 
-async def handle_connection(host, port_in, port_out, token, messages_queue, save_msgs_queue, sending_queue, status_updates_queue, watchdog_queue, ask_nickname_queue, send_nickname_queue, filepath):
+async def handle_connection(
+    host,
+    port_in,
+    port_out,
+    token,
+    user,
+    messages_queue,
+    save_msgs_queue,
+    sending_queue,
+    status_updates_queue,
+    watchdog_queue,
+    filepath
+):
     while True:
         try:
             async with create_task_group() as tg:
@@ -182,11 +232,10 @@ async def handle_connection(host, port_in, port_out, token, messages_queue, save
                     host,
                     port_in,
                     token,
+                    user,
                     sending_queue,
                     status_updates_queue,
                     watchdog_queue,
-                    ask_nickname_queue,
-                    send_nickname_queue,
                 )
                 tg.start_soon(save_messages, filepath, save_msgs_queue)
                 tg.start_soon(watch_for_connection, watchdog_queue)
@@ -262,8 +311,6 @@ async def main():
     status_updates_queue = asyncio.Queue()
     save_msgs_queue = asyncio.Queue()
     watchdog_queue = asyncio.Queue()
-    ask_nickname_queue = asyncio.Queue()
-    send_nickname_queue = asyncio.Queue()
 
     if options.history:
         history_filename = options.history
@@ -271,9 +318,12 @@ async def main():
         history_filename = HISTORY_FILENAME
     await load_history(history_filename, messages_queue)
 
-    if not options.token:
-        print(gui.input_nickname())
-    return
+    if not options.token and not options.user:
+        options.user, root = gui.input_nickname()
+        if not options.user:
+            logger.error('Error registration user')
+            return
+        root.destroy()
     try:
         async with create_task_group() as tg:
             tg.start_soon(
@@ -281,8 +331,6 @@ async def main():
                 messages_queue,
                 sending_queue,
                 status_updates_queue,
-                ask_nickname_queue,
-                send_nickname_queue,
             )
             tg.start_soon(
                 handle_connection,
@@ -290,13 +338,12 @@ async def main():
                 options.port_in,
                 options.port_out,
                 options.token,
+                options.user,
                 messages_queue,
                 save_msgs_queue,
                 sending_queue,
                 status_updates_queue,
                 watchdog_queue,
-                ask_nickname_queue,
-                send_nickname_queue,
                 history_filename
             )
     except InvalidToken:

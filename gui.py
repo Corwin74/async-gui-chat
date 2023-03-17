@@ -56,7 +56,8 @@ async def update_conversation_history(panel, messages_queue):
         if panel.index('end-1c') != '1.0':
             panel.insert('end', '\n')
         panel.insert('end', msg)
-        # TODO сделать промотку умной, чтобы не мешала просматривать историю сообщений
+        # TODO сделать промотку умной,
+        # чтобы не мешала просматривать историю сообщений
         # ScrolledText.frame
         # ScrolledText.vbar
         panel.yview(tk.END)
@@ -66,9 +67,9 @@ async def update_conversation_history(panel, messages_queue):
 async def update_status_panel(status_labels, status_updates_queue):
     nickname_label, read_label, write_label = status_labels
 
-    read_label['text'] = f'Чтение: нет соединения'
-    write_label['text'] = f'Отправка: нет соединения'
-    nickname_label['text'] = f'Имя пользователя: неизвестно'
+    read_label['text'] = 'Чтение: нет соединения'
+    write_label['text'] = 'Отправка: нет соединения'
+    nickname_label['text'] = 'Имя пользователя: неизвестно'
 
     while True:
         msg = await status_updates_queue.get()
@@ -89,13 +90,31 @@ def create_status_panel(root_frame):
     connections_frame = tk.Frame(status_frame)
     connections_frame.pack(side="left")
 
-    nickname_label = tk.Label(connections_frame, height=1, fg='grey', font='arial 10', anchor='w')
+    nickname_label = tk.Label(
+        connections_frame,
+        height=1,
+        fg='grey',
+        font='arial 10',
+        anchor='w',
+    )
     nickname_label.pack(side="top", fill=tk.X)
 
-    status_read_label = tk.Label(connections_frame, height=1, fg='grey', font='arial 10', anchor='w')
+    status_read_label = tk.Label(
+        connections_frame,
+        height=1,
+        fg='grey',
+        font='arial 10',
+        anchor='w',
+    )
     status_read_label.pack(side="top", fill=tk.X)
 
-    status_write_label = tk.Label(connections_frame, height=1, fg='grey', font='arial 10', anchor='w')
+    status_write_label = tk.Label(
+        connections_frame,
+        height=1,
+        fg='grey',
+        font='arial 10',
+        anchor='w',
+    )
     status_write_label.pack(side="top", fill=tk.X)
 
     return (nickname_label, status_read_label, status_write_label)
@@ -115,12 +134,12 @@ def input_nickname():
         send_button["command"] = root.quit
         send_button.pack(anchor='center', pady=10)
         root.mainloop()
-        return input_field.get()
+        return input_field.get(), root
     except tk.TclError:
-        return None
+        return None, None
 
 
-async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname_queue, send_nickname_queue):
+async def draw(messages_queue, sending_queue, status_updates_queue):
     root = tk.Tk()
 
     root.title('Чат Майнкрафтера')
@@ -136,11 +155,17 @@ async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname
     input_field = tk.Entry(input_frame)
     input_field.pack(side="left", fill=tk.X, expand=True)
 
-    input_field.bind("<Return>", lambda event: process_new_message(input_field, sending_queue))
+    input_field.bind(
+        "<Return>",
+        lambda event: process_new_message(input_field, sending_queue)
+    )
 
     send_button = tk.Button(input_frame)
     send_button["text"] = "Отправить"
-    send_button["command"] = lambda: process_new_message(input_field, sending_queue)
+    send_button["command"] = lambda: process_new_message(
+        input_field,
+        sending_queue,
+    )
     send_button.pack(side="left")
 
     conversation_panel = ScrolledText(root_frame, wrap='none')
@@ -148,5 +173,13 @@ async def draw(messages_queue, sending_queue, status_updates_queue, ask_nickname
 
     async with create_task_group() as gui_group:
         gui_group.start_soon(update_tk, root_frame)
-        gui_group.start_soon(update_conversation_history, conversation_panel, messages_queue)
-        gui_group.start_soon(update_status_panel, status_labels, status_updates_queue)
+        gui_group.start_soon(
+            update_conversation_history,
+            conversation_panel,
+            messages_queue
+        )
+        gui_group.start_soon(
+            update_status_panel,
+            status_labels,
+            status_updates_queue
+        )
